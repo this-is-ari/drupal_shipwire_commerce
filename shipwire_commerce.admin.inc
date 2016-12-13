@@ -240,6 +240,9 @@ function shipwire_commerce_shipment_delete_confirm($form, &$form_state, $order, 
  */
 function shipwire_commerce_shipment_delete_confirm_submit($form, &$form_state) {
   $shipment = shipwire_shipment_load($form_state['values']['shipwire_shipment_id']);
+  $shipwire_id = $shipment->shipwire_id;
+  $shipwire = Shipwire::getInstance();
+  $shipwire->cancel($shipwire_id);
   shipwire_shipment_delete($shipment);
 }
 
