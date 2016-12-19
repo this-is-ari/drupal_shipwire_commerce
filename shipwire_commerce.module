@@ -81,7 +81,11 @@ function shipwire_commerce_menu() {
   $items['admin/commerce/orders/%commerce_order/shipwire/%shipwire_shipment/delete'] = array(
     'title' => 'Delete',
     'page callback' => 'drupal_get_form',
-    'page arguments' => array('shipwire_commerce_shipment_delete_confirm', 3, 5),
+    'page arguments' => array(
+      'shipwire_commerce_shipment_delete_confirm',
+      3,
+      5
+    ),
     'access arguments' => array('edit all shipwire shipments'),
     'type' => MENU_LOCAL_TASK,
     'file' => 'shipwire_commerce.admin.inc',
@@ -167,86 +171,89 @@ function shipwire_commerce_rates($shipping_service, $order) {
     $rate_request->addOrder($rate_order);
     $shipwire = Shipwire::getInstance();
     $response = $shipwire->requestRate($rate_request);
-
     $services = shipwire_commerce_method_service_map();
     foreach ($services as $method => $service) {
       $rates[$order->order_id][$service] = FALSE;
+      foreach ($response['data']->resource->rates as $serviceOptions) {
+        foreach ($serviceOptions as $serviceOption) {
+          foreach ($serviceOption as $quote) {
+            if (!empty($quote->serviceLevelCode) && (string) $quote->serviceLevelCode == $method) {
 
-      foreach ($response['data_xml']->Order->Quotes->Quote as $quote) {
-        if (!empty($quote->attributes()->method) && (string) $quote->attributes()->method == $method) {
+              $shipwire_data = array();
 
-          $shipwire_data = array();
+              $shipwire_data['method'] = $method;
+              foreach ($quote->shipments as $shipment) {
+                $shipwire_data['carrier_code'] = check_plain((string) $shipment->carrier->code);
+                $shipwire_data['warehouse_code'] = Shipwire::getWarehouseCode((string) $shipment->warehouseName);
+                $shipwire_data['trackable'] = ((string) !empty($shipment->carrier->properties[0]) ? 1 : 0);
+                $shipwire_data['currency'] = $shipment->cost->currency;
+                $shipwire_data['cost_total'] = (float) $shipment->cost->amount;
+                $shipwire_data['cost_freight'] = 0;
+                $shipwire_data['cost_insurance'] = 0;
+                $shipwire_data['cost_packaging'] = 0;
+                $shipwire_data['cost_handling'] = 0;
+                foreach ($shipment->subtotals as $sub_total) {
+                  switch ($sub_total->type) {
+                    case 'Freight':
+                      $shipwire_data['cost_freight'] = (float) $sub_total->amount;
+                      break;
 
-          $shipwire_data['method'] = $method;
-          $shipwire_data['carrier_code'] = check_plain((string) $quote->CarrierCode);
-          $shipwire_data['warehouse_code'] = Shipwire::getWarehouseCode((string) $quote->Warehouse);
-          $shipwire_data['trackable'] = ((string) $quote->Service->attributes()->trackable == 'YES') ? 1 : 0;
-          $shipwire_data['currency'] = $currency;
-          $shipwire_data['cost_total'] = (float) $quote->Cost;
-          $shipwire_data['cost_freight'] = 0;
-          $shipwire_data['cost_insurance'] = 0;
-          $shipwire_data['cost_packaging'] = 0;
-          $shipwire_data['cost_handling'] = 0;
+                    case 'Insurance':
+                      $shipwire_data['cost_insurance'] = (float) $sub_total->amount;
+                      break;
 
-          foreach ($quote->Subtotals->Subtotal as $sub_total) {
-            switch ($sub_total->attributes()->type) {
-              case 'Freight':
-                $shipwire_data['cost_freight'] = (float) $sub_total->Cost;
-                break;
+                    case 'Packaging':
+                      $shipwire_data['cost_packaging'] = (float) $sub_total->amount;
+                      break;
 
-              case 'Insurance':
-                $shipwire_data['cost_insurance'] = (float) $sub_total->Cost;
-                break;
+                    case 'Handling':
+                      $shipwire_data['cost_handling'] = (float) $sub_total->amount;
+                      break;
+                  }
+                }
 
-              case 'Packaging':
-                $shipwire_data['cost_packaging'] = (float) $sub_total->Cost;
-                break;
+                // For some reason Shipwire choose to include the packaging cost in
+                // the freight cost. Subtract it to get the actual shipping cost.
+                // Confirmed with Shipwire as SOP and not a bug.
+                if (!empty($shipwire_data['cost_freight']) && !empty($shipwire_data['cost_packaging'])) {
+                  $shipwire_data['cost_freight'] = $shipwire_data['cost_freight'] - $shipwire_data['cost_packaging'];
+                }
 
-              case 'Handling':
-                $shipwire_data['cost_handling'] = (float) $sub_total->Cost;
-                break;
+                $shipwire_data['delivery_estimate'] = array(
+                  'minimum' => array(
+                    'unit' => check_plain((string) $shipment->expectedDeliveryMinDate),
+                    'value' => (int) $shipment->expectedDeliveryMinDate,
+                  ),
+                  'maximum' => array(
+                    'unit' => check_plain((string) $shipment->expectedDeliveryMaxDate),
+                    'value' => (int) $shipment->expectedDeliveryMaxDate,
+                  ),
+                );
+
+                $title = Shipwire::getCarrierName($shipwire_data['carrier_code']);
+                if (empty($title)) {
+                  $title = check_plain((string) $quote->Service);
+                }
+                $min = $shipwire_data['delivery_estimate']['minimum']['value'] . ' ' . $shipwire_data['delivery_estimate']['minimum']['unit'];
+                $max = $shipwire_data['delivery_estimate']['maximum']['value'] . ' ' . $shipwire_data['delivery_estimate']['maximum']['unit'];
+
+                $title .= ' (' . $min;
+                if ($min != $max) {
+                  $title .= ' - ' . $max;
+                }
+                $title .= '): ';
+                $title .= commerce_currency_format($shipwire_data['cost_total'], $currency, NULL, FALSE);
+                $shipwire_data['display_title'] = $title;
+
+                $rates[$order->order_id][$service] = array(
+                  'amount' => commerce_currency_decimal_to_amount($shipwire_data['cost_total'], $currency),
+                  'currency_code' => $currency,
+                  'data' => array(),
+                  'shipwire_commerce' => $shipwire_data,
+                );
+              }
             }
           }
-
-          // For some reason Shipwire choose to include the packaging cost in
-          // the freight cost. Subtract it to get the actual shipping cost.
-          // Confirmed with Shipwire as SOP and not a bug.
-          if (!empty($shipwire_data['cost_freight']) && !empty($shipwire_data['cost_packaging'])) {
-            $shipwire_data['cost_freight'] = $shipwire_data['cost_freight'] - $shipwire_data['cost_packaging'];
-          }
-
-          $shipwire_data['delivery_estimate'] = array(
-            'minimum' => array(
-              'unit' => check_plain((string) $quote->DeliveryEstimate->Minimum->attributes()->units),
-              'value' => (int) $quote->DeliveryEstimate->Minimum,
-            ),
-            'maximum' => array(
-              'unit' => check_plain((string) $quote->DeliveryEstimate->Maximum->attributes()->units),
-              'value' => (int) $quote->DeliveryEstimate->Maximum,
-            ),
-          );
-
-          $title = Shipwire::getCarrierName($shipwire_data['carrier_code']);
-          if (empty($title)) {
-            $title = check_plain((string) $quote->Service);
-          }
-          $min = $shipwire_data['delivery_estimate']['minimum']['value'] . ' ' . $shipwire_data['delivery_estimate']['minimum']['unit'];
-          $max = $shipwire_data['delivery_estimate']['maximum']['value'] . ' ' . $shipwire_data['delivery_estimate']['maximum']['unit'];
-
-          $title .= ' (' . $min;
-          if ($min != $max) {
-            $title .= ' - ' . $max;
-          }
-          $title .= '): ';
-          $title .= commerce_currency_format($shipwire_data['cost_total'], $currency, NULL, FALSE);
-          $shipwire_data['display_title'] = $title;
-
-          $rates[$order->order_id][$service] = array(
-            'amount' => commerce_currency_decimal_to_amount($shipwire_data['cost_total'], $currency),
-            'currency_code' => $currency,
-            'data' => array(),
-            'shipwire_commerce' => $shipwire_data,
-          );
         }
       }
     }
@@ -439,7 +446,6 @@ function shipwire_commerce_fulfill_now($order, $products = array()) {
 
     $order_prefix = variable_get('shipwire_commerce_order_prefix', 'SC-');
     $shipwire_order_id = $order_prefix . $order->order_id;
-
     try {
       $rate_order = new ShipwireRateRequestOrder();
       $rate_order->setOrderId($shipwire_order_id);
@@ -473,30 +479,36 @@ function shipwire_commerce_fulfill_now($order, $products = array()) {
 
       $shipwire = Shipwire::getInstance();
       $response = $shipwire->requestFulfillment($fulfill_request);
-
-      if (!empty($response['data_xml']->OrderInformation->Order)) {
-        $shipwire_data = $response['data_xml']->OrderInformation->Order;
+      if ($response['data']->status == '200') {
+        $shipwire_data = $response['data'];
         $messages = array();
         $shipment_status = 'submitted';
-        if (!empty($shipwire_data->WarningList)) {
-          foreach ($shipwire_data->WarningList as $warning) {
+        if (!empty($shipwire_data->warnings)) {
+          foreach ($shipwire_data->warnings as $warning) {
             $messages[] = array(
               'type' => 'warning',
-              'message' => (string) $warning,
+              'message' => (string) $warning->message,
             );
           }
         }
-        if (!empty($shipwire_data->Holds->Hold)) {
-          $shipment_status = 'held';
-          foreach ($shipwire_data->Holds->Hold as $hold) {
-            $messages[] = array(
-              'type' => 'hold',
-              'hold_type' => (string) $hold->Type,
-              'message' => (string) $hold->Description,
-            );
+        if (!empty($shipwire_data->resource->items)) {
+          foreach ($shipwire_data->resource->items as $shipwire) {
+            $shipwire_attributes = $shipwire->resource;
+          }
+          if (!empty($shipwire_attributes->holds)) {
+            foreach ($shipwire_attributes->holds as $hold) {
+              $messages[] = array(
+                'type' => 'hold',
+                'hold_type' => (string) $hold->type,
+                'message' => (string) $hold->description,
+              );
+            }
+            $shipment_status = 'held';
+          }
+          if ($shipwire_attributes->status == 'held') {
+            $shipment_status = 'held';
           }
         }
-
         $rate_info = $cache['rates'][$order->order_id][$service]['shipwire_commerce'];
 
         $shipment = new ShipwireShipment(array('type' => 'commerce_order'));
@@ -515,12 +527,9 @@ function shipwire_commerce_fulfill_now($order, $products = array()) {
         $shipment->cost_handling = $rate_info['cost_handling'];
         $shipment->cost_insurance = $rate_info['cost_insurance'];
         $shipment->cost_packaging = $rate_info['cost_packaging'];
-
         $shipment->data['products'] = $fulfill_order->products;
         $shipment->data['address'] = $fulfill_order->address;
-
-        $shipment->shipwire_id = check_plain((string) $shipwire_data->attributes()->id);
-
+        $shipment->shipwire_id = check_plain((string) $shipwire_order_id);
         $save = $shipment->save();
         if ($save !== FALSE) {
           shipwire_rates_cache_clear($shipwire_order_id);
@@ -528,8 +537,10 @@ function shipwire_commerce_fulfill_now($order, $products = array()) {
           return TRUE;
         }
       }
-    }
-    catch (Exception $e) {
+      else {
+        drupal_set_message(check_plain(t($response['data']->message)), 'error');
+      }
+    } catch (Exception $e) {
       $message = 'Error fulfilling commerce order !order_id.';
       $message_vars = array('!order_id' => $order->order_id);
       Shipwire::logError($message, $message_vars, WATCHDOG_ERROR, $e);
@@ -607,8 +618,7 @@ function shipwire_commerce_fulfill_later($order, $products = array()) {
         shipwire_rates_cache_clear($order_prefix . $order->order_id);
         return TRUE;
       }
-    }
-    catch (Exception $e) {
+    } catch (Exception $e) {
       $message = 'Error creating shipment for commerce order !order_id.';
       $message_vars = array('!order_id' => $order->order_id);
       Shipwire::logError($message, $message_vars, WATCHDOG_ERROR, $e);
@@ -640,8 +650,7 @@ function shipwire_commerce_fulfill_cron() {
           $sids[] = $s->shipwire_shipment_id;
         }
       }
-    }
-    catch (Exception $e) {
+    } catch (Exception $e) {
       $message = 'Error querying database for commerce shipments.';
       Shipwire::logError($message, array(), WATCHDOG_ERROR, $e);
       return;
@@ -669,8 +678,7 @@ function shipwire_commerce_fulfill_cron() {
           $fulfill_order->addProducts($shipment->data['products']);
           $fulfill_order->validate();
           $fulfill_request->addOrder($fulfill_order);
-        }
-        catch (Exception $e) {
+        } catch (Exception $e) {
           $message = 'Error preparing order !order_id shipment !shipment_id for fulfillment.';
           $message_vars = array(
             '!order_id' => $shipment->order_id,
@@ -683,17 +691,16 @@ function shipwire_commerce_fulfill_cron() {
       try {
         $shipwire = Shipwire::getInstance();
         $response = $shipwire->requestFulfillment($fulfill_request);
-      }
-      catch (Exception $e) {
+      } catch (Exception $e) {
         $message = 'Error in response for commerce batch fulfillment';
         Shipwire::logError($message, array(), WATCHDOG_ERROR, $e);
         return;
       }
 
-      if (!empty($response['data_xml']->OrderInformation->Order)) {
-        foreach ($response['data_xml']->OrderInformation->Order as $shipwire) {
-          $shipwire_attributes = $shipwire->attributes();
-          $shipwire_order_id = (string) $shipwire_attributes->number;
+      if ($response['data']->status == 200) {
+        foreach ($response['data']->resource->items as $shipwire) {
+          $shipwire_attributes = $shipwire->resource;
+          $shipwire_order_id = (string) $shipwire_attributes->orderNo;
 
           if (!empty($order_ship_ids[$shipwire_order_id])) {
             $shipwire_shipment_id = $order_ship_ids[$shipwire_order_id];
@@ -701,35 +708,37 @@ function shipwire_commerce_fulfill_cron() {
             try {
               $messages = array();
               $shipment_status = 'submitted';
-              if (!empty($shipwire->WarningList)) {
-                foreach ($shipwire->WarningList as $warning) {
+              if (!empty($response['data']->warnings)) {
+                foreach ($response['data']->warnings as $warning) {
                   $messages[] = array(
                     'type' => 'warning',
                     'message' => (string) $warning,
                   );
                 }
               }
-              if (!empty($shipwire->Holds->Hold)) {
-                foreach ($shipwire->Holds->Hold as $hold) {
+              if (!empty($shipwire_attributes->holds)) {
+                foreach ($shipwire_attributes->holds as $hold) {
                   $messages[] = array(
                     'type' => 'hold',
-                    'hold_type' => (string) $hold->Type,
-                    'message' => (string) $hold->Description,
+                    'hold_type' => (string) $hold->type,
+                    'message' => (string) $hold->description,
                   );
                 }
+                $shipment_status = 'held';
+              }
+              if ($shipwire_attributes->status == 'held') {
                 $shipment_status = 'held';
               }
               $shipment->messages = $messages;
               $shipment->status = $shipment_status;
               $shipment->date_submitted = REQUEST_TIME;
-              $shipment->shipwire_id = check_plain((string) $shipwire_attributes->id);
+              $shipment->shipwire_id = check_plain((string) $shipwire_order_id);
 
               $save = $shipment->save();
               if ($save !== FALSE) {
                 rules_invoke_event('shipwire_commerce_rules_event_order_submitted', $shipment->order_id, $shipment->shipwire_shipment_id);
               }
-            }
-            catch (Exception $e) {
+            } catch (Exception $e) {
               $message = 'Error fulfilling commerce order !order_id shipment !shipment_id';
               $message_vars = array(
                 '!order_id' => $shipment->order_id,
@@ -779,99 +788,75 @@ function shipwire_commerce_tracking_update() {
       // No orders in shipments need checking.
       return;
     }
-
-    try {
-      $shipwire = Shipwire::getInstance();
-      $response = $shipwire->requestTracking($track_request);
+    $trackings = array();
+    $responses = array();
+    foreach ($track_request->shipwire_ids as $shipwire_id) {
+      try {
+        $shipwire = Shipwire::getInstance();
+        $trackings[] = $shipwire->tracking($shipwire_id);
+      } catch (Exception $e) {
+        $message = 'Error processing batch tracking update.';
+        Shipwire::logError($message, array(), WATCHDOG_ERROR, $e);
+        return;
+      }
     }
-    catch (Exception $e) {
-      $message = 'Error processing batch tracking update.';
-      Shipwire::logError($message, array(), WATCHDOG_ERROR, $e);
-      return;
+    foreach ($trackings as $key => $tracking) {
+      if ($tracking['data']->status != 200 || empty($tracking['data']->resource->items)) {
+        unset($trackings[$key]);
+      }
+      else {
+        $responses[] = $tracking;
+      }
     }
-
-    if (count($response['data_xml']->Order) == 0) {
+    if (count($responses) == 0) {
       // No orders in response to process.
       return;
     }
+    foreach ($responses as $response) {
+      if (!empty($response['data']->resource->items)) {
+        foreach ($response['data']->resource->items as $item) {
+          $shipwire_id = (string) $item->resource->orderExternalId;
+          $shipwire_shipment_id = array_search($shipwire_id, $track_shipments);
+          if ($shipwire_shipment_id) {
+            $shipment_org = shipwire_shipment_load($shipwire_shipment_id);
+            try {
+              $shipment_status = $shipment_org->status;
+              $shipment_new = clone $shipment_org;
+              if (empty($shipment_new->date_shipped) && !empty($item->resource->deliveredDate)) {
+                $shipment_new->date_shipped = strtotime((string) $item->resource->deliveredDate);
+                $shipment_new->date_deliviered = strtotime((string) $item->resource->deliveredDate);
+                $shipment_status = 'delivered';
+              }
+              if (!empty($item->resource->url)) {
+                $shipment_new->tracking_number = (string) $item->resource->tracking;
+                if (!empty($item->resource->url)) {
+                  $shipment_new->tracking_uri = filter_xss((string) $item->resource->url);
+                }
+              }
 
-    foreach ($response['data_xml']->Order as $shipwire_data) {
+              if (!empty($item->resourceLocation)) {
+                $shipment_new->shipwire_uri = filter_xss((string) $item->resourceLocation);
+              }
+              $shipment_new->status = $shipment_status;
+              $shipment_new->save();
+              // Trigger rules.
+              if (empty($shipment_org->date_shipped) && !empty($shipment_new->date_shipped)) {
+                rules_invoke_event('shipwire_commerce_rules_event_order_shipped', $shipment_new->order_id, $shipment_new->shipwire_shipment_id);
+              }
+              if (empty($shipment_org->date_deliviered) && !empty($shipment_new->date_deliviered)) {
+                rules_invoke_event('shipwire_commerce_rules_event_order_delivered', $shipment_new->order_id, $shipment_new->shipwire_shipment_id);
+              }
 
-      $shipwire_attrib = $shipwire_data->attributes();
-      $shipwire_id = (string) $shipwire_attrib->shipwireId;
-      $shipwire_shipment_id = array_search($shipwire_id, $track_shipments);
-      if ($shipwire_shipment_id) {
-        $shipment_org = shipwire_shipment_load($shipwire_shipment_id);
-        try {
-          $shipment_status = $shipment_org->status;
-          $shipment_new = clone $shipment_org;
-
-          $messages = array();
-          if (!empty($shipwire_data->Holds->Hold)) {
-            foreach ($shipwire_data->Holds->Hold as $hold) {
-              $messages[] = array(
-                'type' => 'hold',
-                'hold_type' => (string) $hold->Type,
-                'message' => (string) $hold->Description,
+            } catch (Exception $e) {
+              $message = 'Error processing tracking update for order !order_id shipment !shipment_id.';
+              $message_vars = array(
+                '!order_id' => $shipment_org->order_id,
+                '!shipment_id' => $shipment_org->shipwire_shipment_id,
               );
-            }
-            $shipment_status = 'held';
-          }
+              Shipwire::logError($message, $message_vars, WATCHDOG_ERROR, $e);
 
-          if (empty($shipment_new->date_shipped) && !empty($shipwire_attrib->shipDate)) {
-            $shipment_new->date_shipped = strtotime((string) $shipwire_attrib->shipDate);
-            $shipment_status = 'shipped';
-          }
-          if (empty($shipment_new->date_shipped) && (string) $shipwire_attrib->shipped == 'YES') {
-            $shipment_new->date_shipped = REQUEST_TIME;
-            $shipment_status = 'shipped';
-          }
-
-          if (!empty($shipwire_attrib->expectedDeliveryDate)) {
-            $shipment_new->date_expected = strtotime((string) $shipwire_attrib->expectedDeliveryDate);
-          }
-
-          if (empty($shipment_new->date_deliviered) && (string) $shipwire_attrib->delivered == 'YES') {
-            $shipment_new->date_deliviered = REQUEST_TIME;
-            $shipment_status = 'delivered';
-          }
-
-          if (!empty($shipwire_attrib->manuallyEdited)) {
-            $shipment_new->manually_edited = ((string) $shipwire_attrib->manuallyEdited == 'YES') ? 1 : 0;
-          }
-
-          if (!empty($shipwire_data->TrackingNumber)) {
-            $tracking_attrib = $shipwire_data->TrackingNumber->attributes();
-            $shipment_new->tracking_number = (string) $shipwire_data->TrackingNumber;
-            if (!empty($tracking_attrib->deliveryDate)) {
-              $shipment_new->date_deliviered = strtotime((string) $tracking_attrib->deliveryDate);
-            }
-            if (!empty($tracking_attrib->href)) {
-              $shipment_new->tracking_uri = filter_xss((string) $tracking_attrib->href);
             }
           }
-
-          if (!empty($shipwire_attrib->href)) {
-            $shipment_new->shipwire_uri = filter_xss((string) $shipwire_attrib->href);
-          }
-          $shipment_new->status = $shipment_status;
-          $shipment_new->save();
-
-          // Trigger rules.
-          if (empty($shipment_org->date_shipped) && !empty($shipment_new->date_shipped)) {
-            rules_invoke_event('shipwire_commerce_rules_event_order_shipped', $shipment_new->order_id, $shipment_new->shipwire_shipment_id);
-          }
-          if (empty($shipment_org->date_deliviered) && !empty($shipment_new->date_deliviered)) {
-            rules_invoke_event('shipwire_commerce_rules_event_order_delivered', $shipment_new->order_id, $shipment_new->shipwire_shipment_id);
-          }
-        }
-        catch (Exception $e) {
-          $message = 'Error processing tracking update for order !order_id shipment !shipment_id.';
-          $message_vars = array(
-            '!order_id' => $shipment_org->order_id,
-            '!shipment_id' => $shipment_org->shipwire_shipment_id,
-          );
-          Shipwire::logError($message, $message_vars, WATCHDOG_ERROR, $e);
         }
       }
     }
@@ -927,7 +912,6 @@ function shipwire_commerce_inventory_update() {
   if (!Shipwire::operational() || !module_exists('commerce_stock')) {
     return;
   }
-
   $stock_max = variable_get('shipwire_stock_max', 200);
   $stock_freq = variable_get('shipwire_stock_freq', 14400);
   $last_changed = REQUEST_TIME - $stock_freq;
@@ -948,30 +932,27 @@ function shipwire_commerce_inventory_update() {
       $products = commerce_product_load_multiple($pids);
 
       $sku_id_map = array();
-      $request = new ShipwireInventoryRequest();
-      $request->setIncludeEmpty(TRUE);
+      $setIncludeEmpty = TRUE;
+      $params = array();
       foreach ($products as $id => $product) {
         $sku_id_map[$product->sku] = $id;
-        $request->addProductSku($product->sku);
+        $params['sku'] = $product->sku;
       }
 
       $shipwire = Shipwire::getInstance();
-      $response = $shipwire->requestInventory($request);
-    }
-    catch (Exception $e) {
+      $response = $shipwire->getStock($params, $setIncludeEmpty);
+    } catch (Exception $e) {
       $message = 'Error processing batch inventory update.';
       Shipwire::logError($message, array(), WATCHDOG_ERROR, $e);
       return;
     }
 
-    if ((string) $response['data_xml']->Status == "0") {
-
+    if ($response['data']->status == 200) {
       // Process products in response.
-      if (count($response['data_xml']->Product)) {
-        foreach ($response['data_xml']->Product as $sw) {
-          $sw_attrib = $sw->attributes();
-          $sku = (string) $sw_attrib->code;
-          $quantity = check_plain((int) $sw_attrib->quantity);
+      if (count($response['data']->resource->items)) {
+        foreach ($response['data']->resource->items as $sw) {
+          $sku = (string) $sw->resource->sku;
+          $quantity = check_plain((int) $sw->resource->good);
 
           try {
             if (!empty($sku_id_map[$sku])) {
@@ -982,8 +963,7 @@ function shipwire_commerce_inventory_update() {
               $pw->save();
               unset($sku_id_map[$sku]);
             }
-          }
-          catch (Exception $e) {
+          } catch (Exception $e) {
             $message = 'Error processing inventory for product !sku.';
             $message_vars = array('!sku' => check_plain($sku));
             Shipwire::logError($message, $message_vars, WATCHDOG_ERROR, $e);

@@ -152,22 +152,21 @@ function shipwire_commerce_rules_action_inventory_shipment(ShipwireShipment $shi
         $products = commerce_product_load_multiple($pids);
 
         $sku_id_map = array();
-        $request = new ShipwireInventoryRequest();
-
+        $setIncludeEmpty = TRUE;
+        $params = array();
         foreach ($products as $id => $product) {
           $sku_id_map[$product->sku] = $id;
-          $request->addProductSku($product->sku);
+          $params['sku'] = $product->sku;
         }
 
         $shipwire = Shipwire::getInstance();
-        $response = $shipwire->requestInventory($request);
+        $response = $shipwire->getStock($params, $setIncludeEmpty);
 
         // Process products in response.
-        if (count($response['data_xml']->Product)) {
-          foreach ($response['data_xml']->Product as $sw) {
-            $sw_attrib = $sw->attributes();
-            $sku = (string) $sw_attrib->code;
-            $quantity = check_plain((int) $sw_attrib->quantity);
+        if (count($response['data']->resource->items)) {
+          foreach ($response['data']->resource->items as $sw) {
+            $sku = (string) $sw->resource->sku;
+            $quantity = check_plain((int) $sw->resource->good);
 
             if (!empty($sku_id_map[$sku])) {
               $pid = $sku_id_map[$sku];
